@@ -14,17 +14,41 @@
 
 #define PACKET_SIZE 1024
 #define TOATL_SIZE 100000000
+
+//checksum
+unsigned int checksum(unsigned char *message) {
+   int i, j;
+   unsigned int byte, crc, mask;
+
+   i = 0;
+   crc = 0xFFFFFFFF;
+   while (message[i] != 0) {
+      byte = message[i];            // Get next byte.
+      crc = crc ^ byte;
+      for (j = 7; j >= 0; j--) {    // Do eight times.
+         mask = -(crc & 1);
+         crc = (crc >> 1) ^ (0xEDB88320 & mask);
+      }
+      i = i + 1;
+   }
+   return ~crc;
+}
+
 int min(int a, int b){
     if(a<b) return a;
     else return b;
 }
-size_t transferData(int fdIn, int fdOut,size_t totalSize){
+size_t transferData(int fdIn, int fdOut, int fdChecksum,size_t totalSize){
     char buf[PACKET_SIZE];
     int rec;  
     //memset(buf, 0, PACKET_SIZE);  
     clock_t start = clock();
     while ((rec = read(fdIn, buf, min(sizeof(buf),totalSize))) > 0){
-        write(fdOut,buf,rec);
+        if(fdOut!=-1)
+            write(fdOut,buf,rec);
+        if(fdChecksum != -1){
+            dprintf(fdChecksum,"%d\n",checksum(buf));
+        }
         //printf("reading (%ld): %s\n\n",totalSize,buf);
         totalSize -= rec;
     }
@@ -135,44 +159,86 @@ int main(){
     close(inFd);
     */
 
+    if((inFd = open("in.txt", O_RDONLY))<0){
+        exit(EXIT_FAILURE);
+    }
+    //lock inFD
+
+
+   int pipeline[2];
+   if (pipe(pipeline) == -1) {
+        exit(EXIT_FAILURE);
+    }
 
     if((childId = fork())==-1){
+        close(pipeline[0]);
+        close(pipeline[1]);
         exit(EXIT_FAILURE);
     }
     
     if(childId == 0){
         int outFile;
+        int checksumOut;
+        
+        
         //write to new/existing file, or append
+        /*
         if((outFile = open("out.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
+            close(pipeline[0]);
+            close(pipeline[1]);
             exit(EXIT_FAILURE);
         }
-        int sock, serverSock;
-        sock = udSocketServer(&serverSock,"mysock.socket",SOCK_DGRAM);
-        fprintf(stdout,"on socket: %d\n",serverSock);
-        printf("client connected at: %ld\n",clock());
-        size_t time = transferData(sock,outFile,TOATL_SIZE);
+        */
         
-        printf("client left at: %ld\n",clock());
-        printf("time to receive %ld\n",time);
+        //lock checksomeOut
+        if((checksumOut = open("thread_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
+            close(pipeline[0]);
+            close(pipeline[1]);
+            close(outFile);
+            exit(EXIT_FAILURE);
+        }
+        
+        int sock, serverSock;
+        
+
+        sock = udSocketServer(&serverSock,"mysock.socket",SOCK_DGRAM);
+        //fprintf(stdout,"on socket: %d\n",serverSock);
+        //printf("client connected at: %ld\n",clock());
+        
+        //wait for inFd to be unlocked
+        size_t time = transferData(sock,-1,checksumOut,TOATL_SIZE);
+        
+        //printf("client left at: %ld\n",clock());
+        //printf("time to receive %ld\n",time);
         close(serverSock);
+        
 
     }
     else{
+        //give 1 second for the server to start up
         sleep(1);
-        if((inFd = open("in.txt", O_RDONLY))<0){
+        int checksumIn;
+        
+        if((checksumIn = open("main_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
+            close(pipeline[0]);
+            close(pipeline[1]);
             exit(EXIT_FAILURE);
         }
         int sock;
         sock = udSocketClient("mysock.socket",SOCK_DGRAM);
         
-        printf("starting send: %ld\n",clock());
+        //printf("starting send: %ld\n",clock());
         
-        sleep(5);
-        size_t time = transferData(inFd,sock,TOATL_SIZE);
-        printf("finished send: %ld\n",clock());
+        size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
+        //unlocck inFd here
+
+
+        //printf("finished send: %ld\n",clock());
         printf("time to send: %ld\n",time);
         
         close(sock);
+        close(pipeline[0]);
+        close(pipeline[1]);
         wait(NULL);
     }
 
