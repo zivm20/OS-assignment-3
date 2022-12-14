@@ -14,13 +14,15 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h> 
 #include <arpa/inet.h>
-
-#include <errno.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 #define PACKET_SIZE 32768
 #define TOATL_SIZE 100000000
 #define IP "127.0.0.1"
 #define PORT 50000
+#define SHMSZ 27
+
 
 int compare(int fd1, int fd2){
     char c1, c2;
@@ -61,6 +63,92 @@ int min(int a, int b){
     else return b;
 }
 
+
+
+clock_t sharedMemoryServer(int fdChecksum,size_t totalSize){
+    char c;
+    int shmid;
+    key_t key;
+    char *shm;
+
+    size_t rec;
+    char buf[PACKET_SIZE];
+
+    key = 5678;
+
+    //create the segment.
+    if ((shmid = shmget(key, PACKET_SIZE, IPC_CREAT | 0666)) < 0) {
+        perror("shmget");
+        exit(EXIT_FAILURE);
+    }
+
+    
+    //attach the segment to our data space.
+    if ((shm = shmat(shmid, NULL, 0)) == (char *) -1) {
+        perror("shmat");
+        exit(EXIT_FAILURE);
+    }
+    *shm = '*';
+    
+    while (totalSize>0){
+        while(*shm == '*' && totalSize>0){
+            //sleep(1);
+        }
+        if(fdChecksum != -1){ //write checksum to some file descriptor
+            dprintf(fdChecksum,"%d",checksum(shm));
+        }
+        
+        totalSize -= min(strlen(shm), totalSize);
+        *shm = '*';
+        
+    }
+    shmdt(shm);
+
+    return clock();
+
+
+}
+clock_t sharedMemoryClient(int fdIn,int fdChecksum,size_t totalSize){
+    int shmid;
+    key_t key;
+    char *shm, *s;
+    size_t rec;
+    
+    key = 5678;
+    
+    
+    //locate the segment.
+    if ((shmid = shmget(key, PACKET_SIZE, 0666)) < 0) {
+        perror("shmget");
+        exit(1);
+    }
+
+   
+    //attach the segment to our data space.
+    if ((shm = shmat(shmid, NULL, 0)) == (char *) -1) {
+        perror("shmat");
+        exit(1);
+    }
+    clock_t start = clock();
+    
+    while ((rec = read(fdIn, shm, min(PACKET_SIZE,totalSize))) > 0){
+        if(rec < PACKET_SIZE){
+            shm[rec] = '\0';
+        }
+        if(fdChecksum != -1){ //write checksum to some file descriptor
+            dprintf(fdChecksum,"%d",checksum(shm));
+        }
+        
+        totalSize -= rec;
+        while(*shm != '*'){
+            //sleep(1);
+        }
+    }
+    shmdt(shm);
+    return start;
+   
+   
+}
 clock_t transferData(int fdIn, int fdOut, int fdChecksum, size_t totalSize){
     char buf[PACKET_SIZE];
     int rec;  
@@ -341,11 +429,18 @@ int main(int argc, char **argv){
             sock = pipeline[0];
             method = "PIPE";
         }
-        //printf("%s - receiving: %ld\n",method,clock());
-        transferData(sock,-1,checksumPipe[1],TOATL_SIZE);
-        //printf("%s - done: %ld\n",method,clock());
+        if(benchType=='G'){
+            sharedMemoryServer(checksumPipe[1],TOATL_SIZE);
+        }
+        else{
+            //printf("%s - receiving: %ld\n",method,clock());
+            transferData(sock,-1,checksumPipe[1],TOATL_SIZE);
+            //printf("%s - done: %ld\n",method,clock());
+        }
+        
         if(serverSock == -1){
-            close(sock);
+            if(sock != -1)
+                close(sock);
         }
         else{
             close(serverSock);
@@ -373,7 +468,7 @@ int main(int argc, char **argv){
             exit(EXIT_FAILURE);
         }
 
-        int sock;
+        int sock = -1;
         char* method;
         if(benchType=='A'){
             sock = tcpClient();
@@ -397,8 +492,16 @@ int main(int argc, char **argv){
             method = "PIPE";
         }
 
-        printf("%s - start: %ld\n",method,clock());
-        size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
+        if(benchType=='G'){
+            clock_t start = sharedMemoryClient(inFd,checksumIn,TOATL_SIZE);
+            method = "shared memory between threads";
+            printf("%s - start: %ld\n",method,start);
+        }
+        else{
+            printf("%s - start: %ld\n",method,clock());
+            size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
+        }
+        
         //printf("%s - sedning: %ld\n",method,clock());
         
         //inFdLock.l_type = F_UNLCK;
@@ -417,8 +520,10 @@ int main(int argc, char **argv){
             end = -1;
         }
         printf("%s - end: %ld\n",method,end);
+        if(sock != -1){
+            close(sock);
+        }
         
-        close(sock);
         close(checksumPipe[0]);
         
     }

@@ -10,6 +10,7 @@ run: benchmark
 	./benchmark C
 	./benchmark D
 	./benchmark F
+	./benchmark G
 	
 
 benchmark: benchmark.c
