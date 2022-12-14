@@ -70,10 +70,10 @@ clock_t transferData(int fdIn, int fdOut, int fdChecksum, size_t totalSize){
             write(fdOut,buf,rec);
             
         }
-        /*
+        
         else{
             printf("amount left: %ld\n",totalSize);
-        }*/
+        }
         if(fdChecksum != -1){ //write checksum to some file descriptor
             dprintf(fdChecksum,"%d",checksum(buf));
         }
@@ -256,7 +256,7 @@ int udSocketClient(char* name, int socketType){
 
 int main(int argc, char **argv){
     if (argc > 2){
-        printf("usage: benchmark <A/B/C/D/E/F/G>\n");
+        printf("usage: 'benchmark <A/B/C/D/E/F/G>' or 'benchmark' to load data\n");
         return -1;
     }
 
@@ -267,20 +267,22 @@ int main(int argc, char **argv){
         benchType = *argv[1];
     }
     //create random data
-    /*
     
-    srand(time(NULL)); 
-    if((inFd = open("in.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
-        exit(EXIT_FAILURE);
+    if(argc == 1){
+        srand(time(NULL)); 
+        if((inFd = open("in.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
+            exit(EXIT_FAILURE);
+        }
+        for(int i = 0; i<TOATL_SIZE; i++){
+            
+            char c = 'A' + (random() % 26); 
+            write(inFd,&c,1);
+            
+        }
+        close(inFd);
     }
-    for(int i = 0; i<TOTAL_SIZE; i++){
-        
-        char c = 'A' + (random() % 26); 
-        write(inFd,&c,1);
-        
-    }
-    close(inFd);
-    */
+  
+    
 
     if((inFd = open("in.txt", O_RDONLY))<0){
         exit(EXIT_FAILURE);
@@ -358,7 +360,7 @@ int main(int argc, char **argv){
         close(checksumPipe[1]);//close write side
 
         //give 1 second for the server to start up
-        sleep(4);
+        sleep(1);
         int checksumIn;
         
         if((checksumIn = open("main_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
@@ -397,7 +399,7 @@ int main(int argc, char **argv){
 
         printf("%s - start: %ld\n",method,clock());
         size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
-        printf("%s - sedning: %ld\n",method,clock());
+        //printf("%s - sedning: %ld\n",method,clock());
         
         //inFdLock.l_type = F_UNLCK;
         //fcntl(inFd,F_SETLK,&inFdLock);
