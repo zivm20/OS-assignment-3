@@ -16,13 +16,13 @@
 #include <arpa/inet.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 
 #define PACKET_SIZE 32768
 #define TOATL_SIZE 100000000
 #define IP "127.0.0.1"
 #define PORT 50000
-#define SHMSZ 27
-
+#define SHARE_MAP_FILE "sharedmem.txt"
 
 int compare(int fd1, int fd2){
     char c1, c2;
@@ -64,91 +64,126 @@ int min(int a, int b){
 }
 
 
+//get data using mmap  
+clock_t mmapRec(char* memblock, int fdChecksum, size_t totalSize){
+    
+    while (totalSize>0){
+        while(*memblock == '*' && totalSize>0){//wait for sender to overwrite * sign
+            
+        }
+        if(fdChecksum != -1){ //write checksum to some file descriptor
+            dprintf(fdChecksum,"%d",checksum(memblock));
+        }
+        totalSize -= min(strlen(memblock), totalSize);
+        *memblock = '*';//write * sign to notify that we have finished reading this part and may move on
+    }
+    
+    return clock();
+}
+//send data with mmap
+clock_t mmapSend(int fdIn, char* memblock, int fdChecksum, size_t totalSize){
+    size_t rec;
+    
+    clock_t start = clock();
+    while ((rec = read(fdIn, memblock, min(PACKET_SIZE,totalSize))) > 0){
+        if(rec < PACKET_SIZE){//shorten the string
+            memblock[rec] = '\0';
+        }
+        if(fdChecksum != -1){ //write checksum to some file descriptor
+            dprintf(fdChecksum,"%d",checksum(memblock));
+        }
+        
+        totalSize -= rec;
+        while(*memblock != '*'){//wait for receiving side to get the data
+        }
+    }
+    
+    return start;
+    
+   
+}
 
+//use shared memory to get data
 clock_t sharedMemoryServer(int fdChecksum,size_t totalSize){
     char c;
     int shmid;
     key_t key;
     char *shm;
-
     size_t rec;
-    char buf[PACKET_SIZE];
-
     key = 5678;
 
     //create the segment.
     if ((shmid = shmget(key, PACKET_SIZE, IPC_CREAT | 0666)) < 0) {
-        perror("shmget");
+        perror("shmget - sharedMemoryServer\n");
         exit(EXIT_FAILURE);
     }
 
     
     //attach the segment to our data space.
     if ((shm = shmat(shmid, NULL, 0)) == (char *) -1) {
-        perror("shmat");
+        perror("shmat - sharedMemoryServer\n");
         exit(EXIT_FAILURE);
     }
     *shm = '*';
     
     while (totalSize>0){
-        while(*shm == '*' && totalSize>0){
-            //sleep(1);
+        while(*shm == '*' && totalSize>0){//wait for sender to overwrite * sign
         }
         if(fdChecksum != -1){ //write checksum to some file descriptor
             dprintf(fdChecksum,"%d",checksum(shm));
         }
         
         totalSize -= min(strlen(shm), totalSize);
-        *shm = '*';
+        *shm = '*';//write * sign to notify that we have finished reading this part and may move on
         
     }
-    shmdt(shm);
+    shmdt(shm); //detach segment
 
     return clock();
 
 
 }
+//use shared memory to send data
 clock_t sharedMemoryClient(int fdIn,int fdChecksum,size_t totalSize){
     int shmid;
     key_t key;
     char *shm, *s;
     size_t rec;
-    
     key = 5678;
-    
     
     //locate the segment.
     if ((shmid = shmget(key, PACKET_SIZE, 0666)) < 0) {
-        perror("shmget");
-        exit(1);
+        perror("shmget - sharedMemoryClient\n");
+        exit(EXIT_FAILURE);
     }
 
    
     //attach the segment to our data space.
     if ((shm = shmat(shmid, NULL, 0)) == (char *) -1) {
-        perror("shmat");
-        exit(1);
+        perror("shmat - sharedMemoryClient\n");
+        exit(EXIT_FAILURE);
     }
-    clock_t start = clock();
+    clock_t start = clock();//accurate start time
     
     while ((rec = read(fdIn, shm, min(PACKET_SIZE,totalSize))) > 0){
         if(rec < PACKET_SIZE){
-            shm[rec] = '\0';
+            shm[rec] = '\0';//shorten the string
         }
         if(fdChecksum != -1){ //write checksum to some file descriptor
             dprintf(fdChecksum,"%d",checksum(shm));
         }
         
         totalSize -= rec;
-        while(*shm != '*'){
-            //sleep(1);
+        while(*shm != '*'){//wait for receiving side to get the data
+            
         }
     }
     shmdt(shm);
     return start;
-   
-   
 }
+
+//pass data from fdIn to fdOut (optional) while also calculating checksum and writing to fdChecksum (optional)
+//return total time of tranfering
 clock_t transferData(int fdIn, int fdOut, int fdChecksum, size_t totalSize){
     char buf[PACKET_SIZE];
     int rec;  
@@ -158,7 +193,6 @@ clock_t transferData(int fdIn, int fdOut, int fdChecksum, size_t totalSize){
             write(fdOut,buf,rec);
             
         }
-        
         else{
             printf("amount left: %ld\n",totalSize);
         }
@@ -172,21 +206,21 @@ clock_t transferData(int fdIn, int fdOut, int fdChecksum, size_t totalSize){
     clock_t end = clock();
     return end - start;
 }
-
+//universal client for datagram/stream like methods, return client socket
 int clientMain(int client, struct sockaddr *serverAddr, socklen_t len){
     if (connect(client,serverAddr, len) == -1){
-        //printf("CONNECT ERROR: %d\n", sock_errno());
+        perror("client failed to connect\n");
         close(client);
         exit(EXIT_FAILURE);
     }
     return client;
 }
-
+//universal server for datagram/stream like methods, return socket to read from
 int serverMain(int server, int socketType, struct sockaddr *serverAddr, socklen_t len, struct sockaddr *clientAddr){
     int client;
     
     if (bind(server, serverAddr, len) == -1){
-        printf("BIND ERROR %d\n",errno);
+        perror("Bind error\n");
         close(server);
         exit(EXIT_FAILURE);
     }
@@ -194,13 +228,14 @@ int serverMain(int server, int socketType, struct sockaddr *serverAddr, socklen_
     if(socketType != SOCK_DGRAM){
         //start listening for any client sockets
         if (listen(server, 500) == -1){ 
-            printf("listen failed");
+            perror("Listen failed\n");
             close(server);
             exit(EXIT_FAILURE);
         }
         
         //accept client
         if ((client = accept(server,clientAddr, &len)) == -1){
+            perror("Accept failed\n");
             close(server);
             close(client);
             exit(EXIT_FAILURE);
@@ -211,91 +246,102 @@ int serverMain(int server, int socketType, struct sockaddr *serverAddr, socklen_
     return server;
 }
 
-
+//tcp server handler
 int tcpServer(int *server){
     
     struct sockaddr_in serverAddr;
     struct sockaddr_in clientAddr;
-    memset(&clientAddr, 0, sizeof(struct sockaddr_in));
-    memset(&serverAddr, 0, sizeof(struct sockaddr_in));
+    
+    
+    //init server socket 
     if ((*server=socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-        //perror("socket\n");
+        perror("socket - tcpServer\n");
         exit(EXIT_FAILURE);
     } 
+    
+    //set options for socket
     int t = 1;
     setsockopt(*server, SOL_SOCKET, SO_REUSEADDR, (void*) &t, sizeof(t));
-    
+
+    //set server addr
+    memset(&clientAddr, 0, sizeof(struct sockaddr_in));
+    memset(&serverAddr, 0, sizeof(struct sockaddr_in));
     serverAddr.sin_port = htons(PORT);
     if(inet_pton(AF_INET,IP,&serverAddr.sin_addr)<=0){
-        //perror("inet_pton\n");
-        
+        perror("inet_pton - tcpServer\n");
         exit(EXIT_FAILURE);
     }
     serverAddr.sin_family = AF_INET;
     return serverMain(*server,SOCK_STREAM,(struct sockaddr *) &serverAddr,sizeof(struct sockaddr_in),(struct sockaddr *) &clientAddr);
 }
-
+//tcp client handler
 int tcpClient(){
     int client;
     struct sockaddr_in serverAddr;
-    memset(&serverAddr,0,sizeof(struct sockaddr_in));
+    
+    
+    //init client socket
+    if ((client = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("socket - tcpClient\n");
+        exit(EXIT_FAILURE);
+    } 
 
+    //set server addr
+    memset(&serverAddr,0,sizeof(struct sockaddr_in));
     serverAddr.sin_port = htons(PORT);
     if(inet_pton(AF_INET,IP,&serverAddr.sin_addr)<=0){
-        //perror("inet_pton\n");
+        perror("inet_pton - tcpClient\n");
         exit(EXIT_FAILURE);
     }
     serverAddr.sin_family = AF_INET;
     
-    if ((client = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-        //perror("socket\n");
-        exit(EXIT_FAILURE);
-    } 
-
     return clientMain(client, (struct sockaddr *) &serverAddr, sizeof(struct sockaddr_in));
 }
 
+//udp ipv6 server handler
 int udpServer(int *server){
     int reuseaddr = 1;
     struct sockaddr_in6 serverAddr;
     struct sockaddr_in6 clientAddr;
-    memset(&clientAddr, 0, sizeof(struct sockaddr_in6));
-    memset(&serverAddr, 0, sizeof(struct sockaddr_in6));
     int pid;
 
+    //init socket
     if((*server = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) == -1){
-        //printf("SOCKET ERROR: %d\n", sock_errno());
+        perror("socket - udpServer\n");
         exit(EXIT_FAILURE);
     }
+
+    //add options
     setsockopt(*server, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
+
+    //set server addr
+    memset(&clientAddr, 0, sizeof(struct sockaddr_in6));
+    memset(&serverAddr, 0, sizeof(struct sockaddr_in6));
     serverAddr.sin6_family = AF_INET6;
     serverAddr.sin6_port = htons(PORT);
     serverAddr.sin6_addr = in6addr_any;
-    /*
-    if(inet_pton(AF_INET6, "::1", &serverAddr.sin6_addr)<=0){
-        //perror("inet_pton\n");
-        exit(EXIT_FAILURE);
-    }
-    */
+
 
     return serverMain(*server,SOCK_DGRAM,(struct sockaddr *) &serverAddr,sizeof(struct sockaddr_in6) ,(struct sockaddr *) &clientAddr); 
 }
 
-
+//udp ipv6 client handler
 int udpClient(){
     int client;
     struct sockaddr_in6 serverAddr;
     
-
+    //init socket
     if((client = socket(AF_INET6, SOCK_DGRAM, 0))==-1){
-        //printf("SOCKET ERROR: %d\n", sock_errno());
+        perror("socket - udpClient\n");
         exit(EXIT_FAILURE);
     }
+
+    //set server addr
+    memset(&serverAddr, 0, sizeof(struct sockaddr_in6));
     serverAddr.sin6_family = AF_INET6;
     serverAddr.sin6_port = htons(PORT);
-   
     if(inet_pton(AF_INET6, "::1", &serverAddr.sin6_addr)<=0){
-        perror("inet_pton\n");
+        perror("inet_pton - udpClient\n");
         exit(EXIT_FAILURE);
     }
     return clientMain(client, (struct sockaddr *) &serverAddr,sizeof(struct sockaddr_in6));
@@ -306,15 +352,16 @@ int udSocketServer(int* server,char* name, int socketType){
     int client;
     struct sockaddr_un serverAddr;
     struct sockaddr_un clientAddr;     
-    memset(&serverAddr, 0, sizeof(struct sockaddr_un));
-    memset(&clientAddr, 0, sizeof(struct sockaddr_un));
+    
     
     //create a UNIX domain socket 
     if ((*server = socket(AF_UNIX, socketType, 0)) == -1){
-        //printf("SOCKET ERROR: %d\n", sock_errno());
+        perror("socket - udSocketServer\n");
         exit(EXIT_FAILURE);
     }
-    
+
+    memset(&serverAddr, 0, sizeof(struct sockaddr_un));
+    memset(&clientAddr, 0, sizeof(struct sockaddr_un));
     //link socket to our file
     serverAddr.sun_family = AF_UNIX;   
     strcpy(serverAddr.sun_path, name); 
@@ -326,15 +373,16 @@ int udSocketServer(int* server,char* name, int socketType){
 int udSocketClient(char* name, int socketType){
     int client;
     struct sockaddr_un serverAddr;
-    //printf("udSocketClient\n");
-    memset(&serverAddr, 0, sizeof(struct sockaddr_un));
     
     //create a UNIX domain socket 
     if ((client = socket(AF_UNIX, socketType, 0)) == -1){
-        //printf("SOCKET ERROR: %d\n", sock_errno());
+        perror("socket - udSocketClient\n");
+
         exit(EXIT_FAILURE);
     }
+
     //link socket to our file
+    memset(&serverAddr, 0, sizeof(struct sockaddr_un));
     serverAddr.sun_family = AF_UNIX;   
     strcpy(serverAddr.sun_path, name); 
     return clientMain(client, (struct sockaddr *) &serverAddr,sizeof(struct sockaddr_un));
@@ -354,8 +402,8 @@ int main(int argc, char **argv){
     if(argc == 2){
         benchType = *argv[1];
     }
-    //create random data
-    
+
+    //create random data if arg not given
     if(argc == 1){
         srand(time(NULL)); 
         if((inFd = open("in.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
@@ -368,29 +416,46 @@ int main(int argc, char **argv){
             
         }
         close(inFd);
+        return 1;
+    }
+
+    //create the memory mapped file for bench E
+    char *memblock;
+    if(benchType == 'E'){
+        int shareFd;
+        struct stat statbuf;
+        char buf[PACKET_SIZE] = {0};//temp buffer to place initial data into our shared memory file
+        shareFd = open(SHARE_MAP_FILE, O_RDWR | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR);
+        write(shareFd,buf,PACKET_SIZE);
+        if ((memblock = mmap(NULL, PACKET_SIZE, PROT_WRITE | PROT_READ, MAP_SHARED, shareFd, 0)) == MAP_FAILED){
+            perror("mmap init");
+            close(shareFd);
+            exit(EXIT_FAILURE);
+        }
+        close(shareFd);
+        *memblock = '*';//place a "to write" marker
     }
   
     
 
-    if((inFd = open("in.txt", O_RDONLY))<0){
+    if((inFd = open("in.txt", O_RDONLY))<0){//input file
         exit(EXIT_FAILURE);
     }
 
-    //lock inFD
-    //struct flock inFdLock = {F_RDLCK, SEEK_SET, 0, 0, getPid()};
-    //fcntl(inFd, F_SETLKW, &inFdLock);
-
+    //we will pipe the checksum from our child process to our main thread
     int checksumPipe[2];
     int pipeline[2];
     if (pipe(checksumPipe) == -1) {
         exit(EXIT_FAILURE);
     }
+    //for bench F we also need another pipe
     if (benchType == 'F' && pipe(pipeline) == -1) {
         close(checksumPipe[0]);
         close(checksumPipe[1]);
         exit(EXIT_FAILURE);
     }
-
+    
+    //create child process
     if((childId = fork())==-1){
         close(checksumPipe[0]);
         close(checksumPipe[1]);
@@ -432,10 +497,12 @@ int main(int argc, char **argv){
         if(benchType=='G'){
             sharedMemoryServer(checksumPipe[1],TOATL_SIZE);
         }
-        else{
-            //printf("%s - receiving: %ld\n",method,clock());
+        else if(benchType =='E'){
+            
+            mmapRec(memblock,checksumPipe[1],TOATL_SIZE);
+        }
+        else{//all methods except G and E may use this to benchmark the speed, used here to read from sock and calculate checksum
             transferData(sock,-1,checksumPipe[1],TOATL_SIZE);
-            //printf("%s - done: %ld\n",method,clock());
         }
         
         if(serverSock == -1){
@@ -446,6 +513,10 @@ int main(int argc, char **argv){
             close(serverSock);
         }
         
+        
+        if(benchType=='F'){
+            close(pipeline[0]);
+        }
        
         close(checksumPipe[1]);
         return 1;
@@ -454,11 +525,11 @@ int main(int argc, char **argv){
     else{
         close(checksumPipe[1]);//close write side
 
-        //give 1 second for the server to start up
+        //give 1 second for the server to start up, needed by some benchmarks and will not counted for
         sleep(1);
         int checksumIn;
         
-        if((checksumIn = open("main_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
+        if((checksumIn = open("main_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){//we will always write our checksum to here
             close(checksumPipe[0]);
             close(checksumPipe[1]);
             if (benchType == 'F'){
@@ -491,39 +562,47 @@ int main(int argc, char **argv){
             sock = pipeline[1];
             method = "PIPE";
         }
-
         if(benchType=='G'){
             clock_t start = sharedMemoryClient(inFd,checksumIn,TOATL_SIZE);
             method = "shared memory between threads";
             printf("%s - start: %ld\n",method,start);
         }
-        else{
+        else if(benchType == 'E'){
+            clock_t start = mmapSend(inFd, memblock, checksumIn, TOATL_SIZE);
+            method = "MMAP";
+            printf("%s - start: %ld\n",method,start);
+        }
+        else{//all the tests except E and G can use transfer data, used to write to sock and calc checksum 
             printf("%s - start: %ld\n",method,clock());
             size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
         }
         
-        //printf("%s - sedning: %ld\n",method,clock());
         
-        //inFdLock.l_type = F_UNLCK;
-        //fcntl(inFd,F_SETLK,&inFdLock);
-        wait(NULL);
+        wait(NULL);// wait for child process
         time_t end = clock();
-        close(checksumIn);
 
+
+        close(checksumIn);
         if((checksumIn = open("main_checksum.txt", O_RDONLY))<0){
             close(sock);
             close(checksumPipe[0]);
             exit(EXIT_FAILURE);
         }
-        //printf("comparing %d %d\n",checksumIn,checksumPipe[0]);
+
+        //comapre checksumIn to the checksum we got from the child process
         if(compare(checksumIn,checksumPipe[0]) == 0){
             end = -1;
         }
+        //if they don't match, print -1 as our end 
         printf("%s - end: %ld\n",method,end);
+        
+        //close all fd's
         if(sock != -1){
             close(sock);
         }
-        
+        if(benchType=='F'){
+            close(pipeline[1]);
+        }
         close(checksumPipe[0]);
         
     }
