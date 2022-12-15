@@ -403,131 +403,61 @@ int main(int argc, char **argv){
 
     //create random data if arg not given
     if(argc == 1){
+        printf("Making 100M file, this may take some time\n");
         srand(time(NULL)); 
-        if((inFd = open("in.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){
+        struct stat inStat;
+        if((inFd = open("in.txt", O_WRONLY | O_CREAT,S_IRUSR | S_IWUSR))<0){
             exit(EXIT_FAILURE);
         }
-        for(int i = 0; i<TOATL_SIZE; i++){
+        fstat(inFd,&inStat);
+        for(int i = 0; i<TOATL_SIZE-inStat.st_size; i++){
             
             char c = 'A' + (random() % 26); 
             write(inFd,&c,1);
             
         }
         close(inFd);
-        return 1;
+        return 0;
     }
-
-    //create the memory mapped file for bench E
-    char *memblock;
-    if(benchType == 'E'){
-        int shareFd;
-        struct stat statbuf;
-        char buf[PACKET_SIZE] = {0};//temp buffer to place initial data into our shared memory file
-        shareFd = open(SHARE_MAP_FILE, O_RDWR | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR);
-        write(shareFd,buf,PACKET_SIZE);
-        if ((memblock = mmap(NULL, PACKET_SIZE, PROT_WRITE | PROT_READ, MAP_SHARED, shareFd, 0)) == MAP_FAILED){
-            perror("mmap init");
+    else{        
+        //create the memory mapped file for bench E
+        char *memblock;
+        if(benchType == 'E'){
+            int shareFd;
+            struct stat statbuf;
+            char buf[PACKET_SIZE] = {0};//temp buffer to place initial data into our shared memory file
+            shareFd = open(SHARE_MAP_FILE, O_RDWR | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR);
+            write(shareFd,buf,PACKET_SIZE);
+            if ((memblock = mmap(NULL, PACKET_SIZE, PROT_WRITE | PROT_READ, MAP_SHARED, shareFd, 0)) == MAP_FAILED){
+                perror("mmap init");
+                close(shareFd);
+                exit(EXIT_FAILURE);
+            }
             close(shareFd);
+            *memblock = '*';//place a "to write" marker
+        }
+    
+        
+
+        if((inFd = open("in.txt", O_RDONLY))<0){//input file
             exit(EXIT_FAILURE);
         }
-        close(shareFd);
-        *memblock = '*';//place a "to write" marker
-    }
-  
-    
 
-    if((inFd = open("in.txt", O_RDONLY))<0){//input file
-        exit(EXIT_FAILURE);
-    }
-
-    //we will pipe the checksum from our child process to our main thread
-    int checksumPipe[2];
-    int pipeline[2];
-    if (pipe(checksumPipe) == -1) {
-        exit(EXIT_FAILURE);
-    }
-    //for bench F we also need another pipe
-    if (benchType == 'F' && pipe(pipeline) == -1) {
-        close(checksumPipe[0]);
-        close(checksumPipe[1]);
-        exit(EXIT_FAILURE);
-    }
-    
-    //create child process
-    if((childId = fork())==-1){
-        close(checksumPipe[0]);
-        close(checksumPipe[1]);
-        if (benchType == 'F'){
-            close(pipeline[0]);
-            close(pipeline[1]);
+        //we will pipe the checksum from our child process to our main thread
+        int checksumPipe[2];
+        int pipeline[2];
+        if (pipe(checksumPipe) == -1) {
+            exit(EXIT_FAILURE);
         }
-        exit(EXIT_FAILURE);
-    }
-    
-    if(childId == 0){
-        
-        close(checksumPipe[0]);//close read side
-
-        int sock, serverSock = -1;
-        char* method;
-        if(benchType=='A'){
-            sock = tcpServer(&serverSock);
-            method = "TCP/IPv4 Socket";
-        }
-        else if(benchType=='B'){
-            sock = udSocketServer(&serverSock,"mysock.socket",SOCK_STREAM);
-            method = "UDS - Socket stream";
-        }
-        else if(benchType=='C'){
-            sock = udpServer(&serverSock);
-            method = "UDP/IPv6 Socket";
-        }
-        else if(benchType=='D'){
-            
-            sock = udSocketServer(&serverSock,"mysock.socket",SOCK_DGRAM);
-            method = "UDS - Dgram socket";
-        }
-        else if(benchType=='F'){
-            close(pipeline[1]);//close write side
-            sock = pipeline[0];
-            method = "PIPE";
-        }
-        if(benchType=='G'){
-            sharedMemoryServer(checksumPipe[1],TOATL_SIZE);
-        }
-        else if(benchType =='E'){
-            
-            mmapRec(memblock,checksumPipe[1],TOATL_SIZE);
-        }
-        else{//all methods except G and E may use this to benchmark the speed, used here to read from sock and calculate checksum
-            transferData(sock,-1,checksumPipe[1],TOATL_SIZE);
+        //for bench F we also need another pipe
+        if (benchType == 'F' && pipe(pipeline) == -1) {
+            close(checksumPipe[0]);
+            close(checksumPipe[1]);
+            exit(EXIT_FAILURE);
         }
         
-        if(serverSock == -1){
-            if(sock != -1)
-                close(sock);
-        }
-        else{
-            close(serverSock);
-        }
-        
-        
-        if(benchType=='F'){
-            close(pipeline[0]);
-        }
-       
-        close(checksumPipe[1]);
-        return 1;
-
-    }
-    else{
-        close(checksumPipe[1]);//close write side
-
-        //give 1 second for the server to start up, needed by some benchmarks and will not counted for
-        sleep(1);
-        int checksumIn;
-        
-        if((checksumIn = open("main_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){//we will always write our checksum to here
+        //create child process
+        if((childId = fork())==-1){
             close(checksumPipe[0]);
             close(checksumPipe[1]);
             if (benchType == 'F'){
@@ -536,73 +466,147 @@ int main(int argc, char **argv){
             }
             exit(EXIT_FAILURE);
         }
-
-        int sock = -1;
-        char* method;
-        if(benchType=='A'){
-            sock = tcpClient();
-            method = "TCP/IPv4 Socket";
-        }
-        else if(benchType=='B'){
-            sock = udSocketClient("mysock.socket",SOCK_STREAM);
-            method = "UDS - Socket stream";
-        }
-        if(benchType=='C'){
-            sock = udpClient();
-            method = "UDP/IPv6 Socket";
-        }
-        else if(benchType == 'D'){
-            sock = udSocketClient("mysock.socket",SOCK_DGRAM);
-            method = "UDS - Dgram socket";
-        }
-        else if(benchType=='F'){
-            close(pipeline[0]);//close read side
-            sock = pipeline[1];
-            method = "PIPE";
-        }
-        if(benchType=='G'){
-            clock_t start = sharedMemoryClient(inFd,checksumIn,TOATL_SIZE);
-            method = "shared memory between threads";
-            printf("%s - start: %ld\n",method,start);
-        }
-        else if(benchType == 'E'){
-            clock_t start = mmapSend(inFd, memblock, checksumIn, TOATL_SIZE);
-            method = "MMAP";
-            printf("%s - start: %ld\n",method,start);
-        }
-        else{//all the tests except E and G can use transfer data, used to write to sock and calc checksum 
-            printf("%s - start: %ld\n",method,clock());
-            size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
-        }
         
+        if(childId == 0){
+            
+            close(checksumPipe[0]);//close read side
+
+            int sock, serverSock = -1;
+            char* method;
+            if(benchType=='A'){
+                sock = tcpServer(&serverSock);
+                method = "TCP/IPv4 Socket";
+            }
+            else if(benchType=='B'){
+                sock = udSocketServer(&serverSock,"mysock.socket",SOCK_STREAM);
+                method = "UDS - Socket stream";
+            }
+            else if(benchType=='C'){
+                sock = udpServer(&serverSock);
+                method = "UDP/IPv6 Socket";
+            }
+            else if(benchType=='D'){
+                
+                sock = udSocketServer(&serverSock,"mysock.socket",SOCK_DGRAM);
+                method = "UDS - Dgram socket";
+            }
+            else if(benchType=='F'){
+                close(pipeline[1]);//close write side
+                sock = pipeline[0];
+                method = "PIPE";
+            }
+            if(benchType=='G'){
+                sharedMemoryServer(checksumPipe[1],TOATL_SIZE);
+            }
+            else if(benchType =='E'){
+                
+                mmapRec(memblock,checksumPipe[1],TOATL_SIZE);
+            }
+            else{//all methods except G and E may use this to benchmark the speed, used here to read from sock and calculate checksum
+                transferData(sock,-1,checksumPipe[1],TOATL_SIZE);
+            }
+            
+            if(serverSock == -1){
+                if(sock != -1)
+                    close(sock);
+            }
+            else{
+                close(serverSock);
+            }
+            
+            
+            if(benchType=='F'){
+                close(pipeline[0]);
+            }
         
-        wait(NULL);// wait for child process
-        time_t end = clock();
+            close(checksumPipe[1]);
+            return 0;
+
+        }
+        else{
+            close(checksumPipe[1]);//close write side
+
+            //give 1 second for the server to start up, needed by some benchmarks and will not counted for
+            sleep(1);
+            int checksumIn;
+            
+            if((checksumIn = open("main_checksum.txt", O_WRONLY | O_TRUNC | O_CREAT,S_IRUSR | S_IWUSR))<0){//we will always write our checksum to here
+                close(checksumPipe[0]);
+                close(checksumPipe[1]);
+                if (benchType == 'F'){
+                    close(pipeline[0]);
+                    close(pipeline[1]);
+                }
+                exit(EXIT_FAILURE);
+            }
+
+            int sock = -1;
+            char* method;
+            if(benchType=='A'){
+                sock = tcpClient();
+                method = "TCP/IPv4 Socket";
+            }
+            else if(benchType=='B'){
+                sock = udSocketClient("mysock.socket",SOCK_STREAM);
+                method = "UDS - Socket stream";
+            }
+            if(benchType=='C'){
+                sock = udpClient();
+                method = "UDP/IPv6 Socket";
+            }
+            else if(benchType == 'D'){
+                sock = udSocketClient("mysock.socket",SOCK_DGRAM);
+                method = "UDS - Dgram socket";
+            }
+            else if(benchType=='F'){
+                close(pipeline[0]);//close read side
+                sock = pipeline[1];
+                method = "PIPE";
+            }
+            if(benchType=='G'){
+                clock_t start = sharedMemoryClient(inFd,checksumIn,TOATL_SIZE);
+                method = "shared memory between threads";
+                printf("%s - start: %ld\n",method,start);
+            }
+            else if(benchType == 'E'){
+                clock_t start = mmapSend(inFd, memblock, checksumIn, TOATL_SIZE);
+                method = "MMAP";
+                printf("%s - start: %ld\n",method,start);
+            }
+            else{//all the tests except E and G can use transfer data, used to write to sock and calc checksum 
+                printf("%s - start: %ld\n",method,clock());
+                size_t time = transferData(inFd,sock,checksumIn,TOATL_SIZE);
+            }
+            
+            
+            wait(NULL);// wait for child process
+            time_t end = clock();
 
 
-        close(checksumIn);
-        if((checksumIn = open("main_checksum.txt", O_RDONLY))<0){
-            close(sock);
+            close(checksumIn);
+            if((checksumIn = open("main_checksum.txt", O_RDONLY))<0){
+                close(sock);
+                close(checksumPipe[0]);
+                exit(EXIT_FAILURE);
+            }
+
+            //comapre checksumIn to the checksum we got from the child process
+            if(compare(checksumIn,checksumPipe[0]) == 0){
+                end = -1;
+            }
+            //if they don't match, print -1 as our end 
+            printf("%s - end: %ld\n",method,end);
+            
+            //close all fd's
+            if(sock != -1){
+                close(sock);
+            }
+            if(benchType=='F'){
+                close(pipeline[1]);
+            }
             close(checksumPipe[0]);
-            exit(EXIT_FAILURE);
+            
         }
-
-        //comapre checksumIn to the checksum we got from the child process
-        if(compare(checksumIn,checksumPipe[0]) == 0){
-            end = -1;
-        }
-        //if they don't match, print -1 as our end 
-        printf("%s - end: %ld\n",method,end);
-        
-        //close all fd's
-        if(sock != -1){
-            close(sock);
-        }
-        if(benchType=='F'){
-            close(pipeline[1]);
-        }
-        close(checksumPipe[0]);
-        
     }
 
 }
