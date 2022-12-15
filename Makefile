@@ -4,7 +4,7 @@ CXXFLAGS= -Werror
 all: benchmark 
 
 run: benchmark
-#	./benchmark
+	./benchmark
 	./benchmark A
 	./benchmark B
 	./benchmark C
