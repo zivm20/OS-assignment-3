@@ -193,9 +193,7 @@ clock_t transferData(int fdIn, int fdOut, int fdChecksum, size_t totalSize){
             write(fdOut,buf,rec);
             
         }
-        else{
-            printf("amount left: %ld\n",totalSize);
-        }
+        
         if(fdChecksum != -1){ //write checksum to some file descriptor
             dprintf(fdChecksum,"%d",checksum(buf));
         }
