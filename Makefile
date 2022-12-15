@@ -4,10 +4,10 @@ CXXFLAGS= -Werror
 all: benchmark 
 
 run: benchmark
-	./benchmark
+#	./benchmark
+	./benchmark C
 	./benchmark A
 	./benchmark B
-	./benchmark C
 	./benchmark D
 	./benchmark E
 	./benchmark F
